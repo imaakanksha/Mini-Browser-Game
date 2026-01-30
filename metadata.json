@@ -1,0 +1,5 @@
+{
+  "name": "Neon Slither: Grid Runner",
+  "description": "A high-fidelity neon snake arcade game with grid-based movement, progressive difficulty, and AI-generated slither commentary.",
+  "requestFramePermissions": []
+}
