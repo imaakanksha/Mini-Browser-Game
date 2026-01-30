@@ -1,7 +1,7 @@
 
-import React, { useRef, useEffect, useCallback } from 'react';
-import { Point, Direction, Particle, Combo } from '../types';
-import { COLORS, GAME_CONFIG } from '../constants';
+import React, { useRef, useEffect, useCallback, useImperativeHandle, forwardRef } from 'react';
+import { Point, Direction, IParticle, ComboState } from '../types';
+import { GAME_CONFIG } from '../constants';
 
 interface GameViewProps {
   isActive: boolean;
@@ -9,247 +9,248 @@ interface GameViewProps {
   onScoreChange: (score: number) => void;
 }
 
-const GameView: React.FC<GameViewProps> = ({ isActive, onGameOver, onScoreChange }) => {
+export interface GameViewHandle {
+  changeDirection: (dir: Direction) => void;
+}
+
+/**
+ * ObjectPool manages reusable particle objects.
+ * Performance optimization: Prevents GC thrashing.
+ */
+class ParticlePool {
+  private pool: IParticle[] = [];
+
+  constructor(size: number) {
+    for (let i = 0; i < size; i++) {
+      this.pool.push(this.createNew());
+    }
+  }
+
+  private createNew(): IParticle {
+    return { x: 0, y: 0, vx: 0, vy: 0, life: 0, active: false, color: '', size: 0 };
+  }
+
+  public get(): IParticle | null {
+    const p = this.pool.find(i => !i.active);
+    if (p) return p;
+    return null; // Cap reached
+  }
+
+  public release(p: IParticle) {
+    p.active = false;
+  }
+
+  public getActive(): IParticle[] {
+    return this.pool.filter(p => p.active);
+  }
+}
+
+const GameView = forwardRef<GameViewHandle, GameViewProps>(({ isActive, onGameOver, onScoreChange }, ref) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const poolRef = useRef<ParticlePool>(new ParticlePool(GAME_CONFIG.PARTICLES.POOL_SIZE));
+  
+  // Encapsulated game state reference
   const stateRef = useRef({
     snake: [] as Point[],
     food: { x: 0, y: 0 } as Point,
     powerUp: null as Point | null,
-    powerUpTimer: 0,
+    powerUpExpiry: 0,
     direction: Direction.RIGHT,
     nextDirection: Direction.RIGHT,
     score: 0,
     lastTick: 0,
-    speed: GAME_CONFIG.INITIAL_SPEED,
-    particles: [] as Particle[],
-    combo: null as Combo | null,
+    startTime: 0,
+    speed: GAME_CONFIG.SNAKE.INITIAL_SPEED as number,
+    combo: null as ComboState | null,
     frameCount: 0
   });
 
-  const createParticles = (x: number, y: number, color: string) => {
-    for (let i = 0; i < GAME_CONFIG.PARTICLE_COUNT; i++) {
-      stateRef.current.particles.push({
-        x, y,
-        vx: (Math.random() - 0.5) * 8,
-        vy: (Math.random() - 0.5) * 8,
-        life: 1.0,
-        color: color,
-        size: Math.random() * 4 + 2
-      });
+  // Expose direction control to the parent App component
+  useImperativeHandle(ref, () => ({
+    changeDirection: (dir: Direction) => {
+      const cur = stateRef.current.direction;
+      if (dir === Direction.UP && cur !== Direction.DOWN) stateRef.current.nextDirection = Direction.UP;
+      if (dir === Direction.DOWN && cur !== Direction.UP) stateRef.current.nextDirection = Direction.DOWN;
+      if (dir === Direction.LEFT && cur !== Direction.RIGHT) stateRef.current.nextDirection = Direction.LEFT;
+      if (dir === Direction.RIGHT && cur !== Direction.LEFT) stateRef.current.nextDirection = Direction.RIGHT;
+    }
+  }));
+
+  const generatePoint = (snake: Point[]): Point => {
+    let point: Point;
+    let attempts = 0;
+    const maxAttempts = 100;
+    while (attempts < maxAttempts) {
+      point = {
+        x: Math.floor(Math.random() * GAME_CONFIG.GRID.TILE_COUNT),
+        y: Math.floor(Math.random() * GAME_CONFIG.GRID.TILE_COUNT)
+      };
+      if (!snake.some(s => s.x === point.x && s.y === point.y)) return point;
+      attempts++;
+    }
+    return { x: 0, y: 0 }; // Fallback
+  };
+
+  const spawnExplosion = (x: number, y: number, color: string) => {
+    for (let i = 0; i < GAME_CONFIG.PARTICLES.COUNT_PER_EXPLOSION; i++) {
+      const p = poolRef.current.get();
+      if (p) {
+        p.active = true;
+        p.x = x;
+        p.y = y;
+        p.vx = (Math.random() - 0.5) * 8;
+        p.vy = (Math.random() - 0.5) * 8;
+        p.life = 1.0;
+        p.color = color;
+        p.size = Math.random() * 4 + 2;
+      }
     }
   };
 
-  const generatePoint = useCallback((snake: Point[]): Point => {
-    let point: Point;
-    while (true) {
-      point = {
-        x: Math.floor(Math.random() * GAME_CONFIG.TILE_COUNT),
-        y: Math.floor(Math.random() * GAME_CONFIG.TILE_COUNT)
-      };
-      const onSnake = snake.some(segment => segment.x === point.x && segment.y === point.y);
-      if (!onSnake) break;
-    }
-    return point;
-  }, []);
-
   const resetGame = useCallback(() => {
-    const initialSnake = [
-      { x: 5, y: 10 },
-      { x: 4, y: 10 },
-      { x: 3, y: 10 }
-    ];
+    const initialSnake: Point[] = [];
+    for (let i = 0; i < GAME_CONFIG.SNAKE.INITIAL_LENGTH; i++) {
+      initialSnake.push({ 
+        x: GAME_CONFIG.SNAKE.INITIAL_POS.x - i, 
+        y: GAME_CONFIG.SNAKE.INITIAL_POS.y 
+      });
+    }
+
     stateRef.current = {
       snake: initialSnake,
       food: generatePoint(initialSnake),
       powerUp: null,
-      powerUpTimer: 0,
+      powerUpExpiry: 0,
       direction: Direction.RIGHT,
       nextDirection: Direction.RIGHT,
       score: 0,
       lastTick: performance.now(),
-      speed: GAME_CONFIG.INITIAL_SPEED,
-      particles: [],
+      startTime: Date.now(),
+      speed: GAME_CONFIG.SNAKE.INITIAL_SPEED,
       combo: null,
       frameCount: 0
     };
     onScoreChange(0);
-  }, [generatePoint, onScoreChange]);
+  }, [onScoreChange]);
 
   const update = useCallback(() => {
-    const state = stateRef.current;
-    state.direction = state.nextDirection;
-    const head = { ...state.snake[0] };
+    const s = stateRef.current;
+    s.direction = s.nextDirection;
+    const head = { ...s.snake[0] };
 
-    switch (state.direction) {
+    switch (s.direction) {
       case Direction.UP: head.y -= 1; break;
       case Direction.DOWN: head.y += 1; break;
       case Direction.LEFT: head.x -= 1; break;
       case Direction.RIGHT: head.x += 1; break;
     }
 
-    // Collision checks
-    if (head.x < 0 || head.x >= GAME_CONFIG.TILE_COUNT || head.y < 0 || head.y >= GAME_CONFIG.TILE_COUNT ||
-        state.snake.some(segment => segment.x === head.x && segment.y === head.y)) {
-      onGameOver(state.score);
+    if (head.x < 0 || head.x >= GAME_CONFIG.GRID.TILE_COUNT || head.y < 0 || head.y >= GAME_CONFIG.GRID.TILE_COUNT ||
+        s.snake.some(seg => seg.x === head.x && seg.y === head.y)) {
+      onGameOver(s.score);
       return;
     }
 
-    const newSnake = [head, ...state.snake];
+    const newSnake = [head, ...s.snake];
     const now = performance.now();
 
-    // Check Food
-    if (head.x === state.food.x && head.y === state.food.y) {
-      let points = 10;
-      
-      // Combo logic
-      if (state.combo && now - state.combo.lastTime < GAME_CONFIG.COMBO_WINDOW) {
-        state.combo.count++;
-        state.combo.lastTime = now;
-        state.combo.opacity = 1.0;
-        points += state.combo.count * 5;
+    if (head.x === s.food.x && head.y === s.food.y) {
+      let basePoints = 10;
+      if (s.combo && now - s.combo.lastTime < GAME_CONFIG.UI.COMBO_WINDOW) {
+        s.combo.count++;
+        s.combo.opacity = 1.0;
+        basePoints += s.combo.count * 5;
       } else {
-        state.combo = { count: 1, lastTime: now, x: head.x, y: head.y, opacity: 1.0 };
+        s.combo = { count: 1, lastTime: now, x: head.x, y: head.y, opacity: 1.0 };
       }
+      s.combo.lastTime = now;
 
-      state.score += points;
-      onScoreChange(state.score);
-      createParticles(state.food.x, state.food.y, COLORS.FOOD);
-      state.food = generatePoint(newSnake);
-      
-      // Speed Increase
-      if (state.score % 50 === 0) {
-        state.speed = Math.max(GAME_CONFIG.MIN_SPEED, state.speed - GAME_CONFIG.SPEED_INCREMENT);
-      }
+      s.score += basePoints;
+      onScoreChange(s.score);
+      spawnExplosion(s.food.x, s.food.y, GAME_CONFIG.COLORS.FOOD);
+      s.food = generatePoint(newSnake);
+      s.speed = Math.max(GAME_CONFIG.SNAKE.MIN_SPEED, s.speed - GAME_CONFIG.SNAKE.SPEED_INCREMENT);
 
-      // Powerup Spawn Chance
-      if (state.score % 100 === 0 && !state.powerUp) {
-        state.powerUp = generatePoint(newSnake);
-        state.powerUpTimer = now + GAME_CONFIG.POWERUP_DURATION;
+      if (s.score % GAME_CONFIG.POWERUPS.SPAWN_SCORE_INTERVAL === 0 && Math.random() < GAME_CONFIG.POWERUPS.PROBABILITY) {
+        s.powerUp = generatePoint(newSnake);
+        s.powerUpExpiry = now + GAME_CONFIG.POWERUPS.DURATION;
       }
-    } else if (state.powerUp && head.x === state.powerUp.x && head.y === state.powerUp.y) {
-      // Powerup collection
-      state.score += 50;
-      onScoreChange(state.score);
-      createParticles(state.powerUp.x, state.powerUp.y, COLORS.POWERUP);
-      
-      // Effects: Shrink tail
-      if (newSnake.length > 5) {
-        newSnake.splice(-3);
-      }
-      // Effect: Temporary Slow
-      state.speed += 20; 
-      
-      state.powerUp = null;
+    } else if (s.powerUp && head.x === s.powerUp.x && head.y === s.powerUp.y) {
+      s.score += 50;
+      onScoreChange(s.score);
+      spawnExplosion(s.powerUp.x, s.powerUp.y, GAME_CONFIG.COLORS.POWERUP);
+      if (newSnake.length > 5) newSnake.splice(-3);
+      s.speed += 20; 
+      s.powerUp = null;
     } else {
       newSnake.pop();
     }
 
-    state.snake = newSnake;
-
-    // Clear expired powerup
-    if (state.powerUp && now > state.powerUpTimer) {
-      state.powerUp = null;
-    }
-  }, [onGameOver, onScoreChange, generatePoint]);
+    s.snake = newSnake;
+    if (s.powerUp && now > s.powerUpExpiry) s.powerUp = null;
+  }, [onGameOver, onScoreChange]);
 
   const draw = useCallback((ctx: CanvasRenderingContext2D, size: number) => {
-    const state = stateRef.current;
-    const tileSize = size / GAME_CONFIG.TILE_COUNT;
-    const now = performance.now();
-
-    // Clear
-    ctx.fillStyle = COLORS.BACKGROUND;
+    const s = stateRef.current;
+    const tileSize = size / GAME_CONFIG.GRID.TILE_COUNT;
+    
+    ctx.fillStyle = GAME_CONFIG.COLORS.BACKGROUND;
     ctx.fillRect(0, 0, size, size);
 
-    // Grid
-    ctx.strokeStyle = COLORS.GRID;
-    ctx.lineWidth = 1;
-    for (let i = 0; i <= GAME_CONFIG.TILE_COUNT; i++) {
+    ctx.strokeStyle = GAME_CONFIG.COLORS.GRID;
+    ctx.lineWidth = GAME_CONFIG.GRID.LINE_WIDTH;
+    for (let i = 0; i <= GAME_CONFIG.GRID.TILE_COUNT; i++) {
       ctx.beginPath();
-      ctx.moveTo(i * tileSize, 0);
-      ctx.lineTo(i * tileSize, size);
+      ctx.moveTo(i * tileSize, 0); ctx.lineTo(i * tileSize, size);
       ctx.stroke();
       ctx.beginPath();
-      ctx.moveTo(0, i * tileSize);
-      ctx.lineTo(size, i * tileSize);
+      ctx.moveTo(0, i * tileSize); ctx.lineTo(size, i * tileSize);
       ctx.stroke();
     }
 
-    // Particles
-    state.particles.forEach((p, idx) => {
+    poolRef.current.getActive().forEach(p => {
       ctx.globalAlpha = p.life;
       ctx.fillStyle = p.color;
-      ctx.shadowBlur = 5;
-      ctx.shadowColor = p.color;
-      ctx.fillRect(p.x * tileSize + tileSize/2 - p.size/2, p.y * tileSize + tileSize/2 - p.size/2, p.size, p.size);
+      ctx.fillRect(p.x * tileSize + tileSize/2, p.y * tileSize + tileSize/2, p.size, p.size);
       p.x += p.vx * 0.02;
       p.y += p.vy * 0.02;
-      p.life -= 0.02;
-      if (p.life <= 0) state.particles.splice(idx, 1);
+      p.life -= GAME_CONFIG.PARTICLES.FADE_SPEED;
+      if (p.life <= 0) poolRef.current.release(p);
     });
     ctx.globalAlpha = 1;
 
-    // Food
-    ctx.shadowBlur = 15 + Math.sin(now / 150) * 10;
-    ctx.shadowColor = COLORS.FOOD;
-    ctx.fillStyle = COLORS.FOOD;
-    const pulse = 0.8 + Math.sin(now / 150) * 0.2;
+    ctx.shadowBlur = 15;
+    ctx.shadowColor = GAME_CONFIG.COLORS.FOOD;
+    ctx.fillStyle = GAME_CONFIG.COLORS.FOOD;
     ctx.beginPath();
-    ctx.arc(state.food.x * tileSize + tileSize/2, state.food.y * tileSize + tileSize/2, (tileSize/3) * pulse, 0, Math.PI * 2);
+    ctx.arc(s.food.x * tileSize + tileSize/2, s.food.y * tileSize + tileSize/2, tileSize/3, 0, Math.PI * 2);
     ctx.fill();
 
-    // PowerUp
-    if (state.powerUp) {
-      ctx.shadowBlur = 25;
-      ctx.shadowColor = COLORS.POWERUP;
-      ctx.fillStyle = COLORS.POWERUP;
-      const t = (state.powerUpTimer - now) / GAME_CONFIG.POWERUP_DURATION;
-      ctx.globalAlpha = t > 0.2 ? 1 : (Math.sin(now/50) > 0 ? 1 : 0.3); // Flashing when expiring
+    if (s.powerUp) {
+      ctx.shadowColor = GAME_CONFIG.COLORS.POWERUP;
+      ctx.fillStyle = GAME_CONFIG.COLORS.POWERUP;
       ctx.beginPath();
-      ctx.arc(state.powerUp.x * tileSize + tileSize/2, state.powerUp.y * tileSize + tileSize/2, tileSize/2.5, 0, Math.PI * 2);
+      ctx.arc(s.powerUp.x * tileSize + tileSize/2, s.powerUp.y * tileSize + tileSize/2, tileSize/2.2, 0, Math.PI * 2);
       ctx.fill();
-      ctx.globalAlpha = 1;
     }
 
-    // Snake
-    state.snake.forEach((segment, index) => {
-      const isHead = index === 0;
-      ctx.shadowBlur = isHead ? 25 : 10;
-      const color = isHead ? COLORS.SNAKE_HEAD : COLORS.SNAKE_BODY;
+    s.snake.forEach((seg, idx) => {
+      const isHead = idx === 0;
+      ctx.shadowBlur = isHead ? 20 : 5;
+      const color = isHead ? GAME_CONFIG.COLORS.SNAKE_HEAD : GAME_CONFIG.COLORS.SNAKE_BODY;
       ctx.shadowColor = color;
       ctx.fillStyle = color;
-      
-      const padding = isHead ? 1 : 3;
-      const r = isHead ? 8 : 4;
       ctx.beginPath();
-      ctx.roundRect(
-        segment.x * tileSize + padding, 
-        segment.y * tileSize + padding, 
-        tileSize - padding * 2, 
-        tileSize - padding * 2, 
-        r
-      );
+      ctx.roundRect(seg.x * tileSize + 2, seg.y * tileSize + 2, tileSize - 4, tileSize - 4, isHead ? 8 : 4);
       ctx.fill();
-
-      if (isHead) {
-        ctx.fillStyle = '#000';
-        ctx.shadowBlur = 0;
-        const eyeOffset = tileSize / 4;
-        const eyeSize = 2;
-        ctx.fillRect(segment.x * tileSize + tileSize/2 - eyeSize/2, segment.y * tileSize + eyeOffset, eyeSize, eyeSize);
-        ctx.fillRect(segment.x * tileSize + tileSize/2 - eyeSize/2, segment.y * tileSize + tileSize - eyeOffset - eyeSize, eyeSize, eyeSize);
-      }
     });
 
-    // Combo Text
-    if (state.combo && state.combo.opacity > 0) {
-        ctx.shadowBlur = 10;
-        ctx.shadowColor = COLORS.TEXT_NEON;
-        ctx.fillStyle = `rgba(0, 242, 255, ${state.combo.opacity})`;
-        ctx.font = '900 16px Orbitron';
-        ctx.textAlign = 'center';
-        ctx.fillText(`COMBO x${state.combo.count}`, state.combo.x * tileSize + tileSize/2, (state.combo.y - 1) * tileSize);
-        state.combo.opacity -= 0.01;
+    if (s.combo && s.combo.opacity > 0) {
+      ctx.fillStyle = `rgba(0, 242, 255, ${s.combo.opacity})`;
+      ctx.font = '700 14px Orbitron';
+      ctx.textAlign = 'center';
+      ctx.fillText(`COMBO x${s.combo.count}`, s.combo.x * tileSize + tileSize/2, (s.combo.y - 1) * tileSize);
+      s.combo.opacity -= 0.01;
     }
 
     ctx.shadowBlur = 0;
@@ -262,56 +263,57 @@ const GameView: React.FC<GameViewProps> = ({ isActive, onGameOver, onScoreChange
     if (!ctx) return;
 
     const resize = () => {
-      const minDim = Math.min(window.innerWidth * 0.9, window.innerHeight * 0.7);
-      canvas.width = minDim;
-      canvas.height = minDim;
+      const dim = Math.min(window.innerWidth * 0.8, window.innerHeight * 0.7);
+      canvas.width = dim;
+      canvas.height = dim;
     };
     window.addEventListener('resize', resize);
     resize();
 
-    const handleKeyDown = (e: KeyboardEvent) => {
-      const current = stateRef.current.direction;
+    const handleKey = (e: KeyboardEvent) => {
+      const cur = stateRef.current.direction;
       switch (e.key) {
-        case 'ArrowUp': case 'w': if (current !== Direction.DOWN) stateRef.current.nextDirection = Direction.UP; break;
-        case 'ArrowDown': case 's': if (current !== Direction.UP) stateRef.current.nextDirection = Direction.DOWN; break;
-        case 'ArrowLeft': case 'a': if (current !== Direction.RIGHT) stateRef.current.nextDirection = Direction.LEFT; break;
-        case 'ArrowRight': case 'd': if (current !== Direction.LEFT) stateRef.current.nextDirection = Direction.RIGHT; break;
+        case 'ArrowUp': case 'w': if (cur !== Direction.DOWN) stateRef.current.nextDirection = Direction.UP; break;
+        case 'ArrowDown': case 's': if (cur !== Direction.UP) stateRef.current.nextDirection = Direction.DOWN; break;
+        case 'ArrowLeft': case 'a': if (cur !== Direction.RIGHT) stateRef.current.nextDirection = Direction.LEFT; break;
+        case 'ArrowRight': case 'd': if (cur !== Direction.LEFT) stateRef.current.nextDirection = Direction.RIGHT; break;
       }
       if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', ' '].includes(e.key)) e.preventDefault();
     };
-    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('keydown', handleKey);
 
     if (isActive) resetGame();
 
-    let aniId: number;
-    const loop = (time: number) => {
+    let ani: number;
+    const loop = (t: number) => {
       if (isActive) {
-        if (time - stateRef.current.lastTick >= stateRef.current.speed) {
+        if (t - stateRef.current.lastTick >= stateRef.current.speed) {
           update();
-          stateRef.current.lastTick = time;
+          stateRef.current.lastTick = t;
         }
       }
       draw(ctx, canvas.width);
-      aniId = requestAnimationFrame(loop);
+      ani = requestAnimationFrame(loop);
     };
-    aniId = requestAnimationFrame(loop);
+    ani = requestAnimationFrame(loop);
 
     return () => {
       window.removeEventListener('resize', resize);
-      window.removeEventListener('keydown', handleKeyDown);
-      cancelAnimationFrame(aniId);
+      window.removeEventListener('keydown', handleKey);
+      cancelAnimationFrame(ani);
     };
   }, [isActive, update, draw, resetGame]);
 
   return (
-    <div className="relative p-2 rounded-[2.5rem] border-8 border-cyan-500/20 shadow-[0_0_100px_rgba(0,242,255,0.15)] bg-black overflow-hidden group transition-all duration-700 hover:border-cyan-500/40">
-        <canvas ref={canvasRef} className="block rounded-[1.8rem]" />
-        {/* Subtle Scanlines */}
-        <div className="absolute inset-0 pointer-events-none opacity-[0.03] bg-[linear-gradient(rgba(18,16,16,0)_50%,rgba(0,0,0,0.25)_50%),linear-gradient(90deg,rgba(255,0,0,0.06),rgba(0,255,0,0.02),rgba(0,0,255,0.06))] bg-[length:100%_2px,3px_100%]"></div>
-        {/* Edge Glow */}
-        <div className="absolute inset-0 pointer-events-none rounded-[1.8rem] border border-cyan-500/10 shadow-[inset_0_0_20px_rgba(0,242,255,0.1)]"></div>
+    <div className="relative p-2 rounded-[2rem] border-4 border-cyan-500/30 bg-black">
+      <canvas 
+        ref={canvasRef} 
+        tabIndex={0} 
+        aria-label="Neon Slither Snake Game Area" 
+        className="block rounded-3xl"
+      />
     </div>
   );
-};
+});
 
 export default GameView;
